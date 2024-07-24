@@ -41,8 +41,8 @@ export default function Home() {
   }
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center p-24">
-      <div className="flex flex-col items-center space-y-4">
+    <div className="h-full flex flex-col items-center justify-center p-24">
+      <div className="flex flex-col items-center space-y-8">
         {["vehicles", "routes", "baseLoad"].map((fileType) => (
           <FileInput
             key={fileType}
@@ -52,7 +52,9 @@ export default function Home() {
           />
         ))}
       </div>
-      <Button onClick={handleUpload}>Upload</Button>
-    </main>
+      <Button className="mt-10" variant="default" onClick={handleUpload}>
+        Upload
+      </Button>
+    </div>
   );
 }
