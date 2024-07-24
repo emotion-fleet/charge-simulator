@@ -98,7 +98,7 @@ async def simulate(
     routes_df["EnergyRequired_kWh"] = routes_df["RouteLength_km"] * routes_df["Efficiency_kWh_km"]
 
     # Save the calculated energy requirements to a CSV file
-    energy_requirements_path = "energy_requirements.csv"
+    energy_requirements_path = "/tmp/energy_requirements.csv"
     routes_df.to_csv(energy_requirements_path, index=False)
 
     # Simulation with charge management
@@ -112,7 +112,7 @@ async def simulate(
     ]
     simulation_results_with_management = simulation_results_with_management[cols]
 
-    simulation_results_with_management_path = "simulation_results_with_management.csv"
+    simulation_results_with_management_path = "/tmp/simulation_results_with_management.csv"
     simulation_results_with_management.to_csv(simulation_results_with_management_path, index=False)
 
     # Simulation without charge management
@@ -123,15 +123,15 @@ async def simulate(
 
     simulation_results_without_management = simulation_results_without_management[cols]
 
-    simulation_results_without_management_path = "simulation_results_without_management.csv"
+    simulation_results_without_management_path = "/tmp/simulation_results_without_management.csv"
     simulation_results_without_management.to_csv(simulation_results_without_management_path, index=False)
 
     # Create a zip file containing all CSV files
-    zip_file_path = "simulation_results.zip"
+    zip_file_path = "/tmp/simulation_results.zip"
     with ZipFile(zip_file_path, "w") as zipf:
-        zipf.write(energy_requirements_path)
-        zipf.write(simulation_results_with_management_path)
-        zipf.write(simulation_results_without_management_path)
+        zipf.write(energy_requirements_path, arcname="energy_requirements.csv")
+        zipf.write(simulation_results_with_management_path, arcname="simulation_results_with_management.csv")
+        zipf.write(simulation_results_without_management_path, arcname="simulation_results_without_management.csv")
 
     # Clean up individual CSV files
     os.remove(energy_requirements_path)
