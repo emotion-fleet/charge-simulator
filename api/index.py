@@ -1,4 +1,5 @@
-from fastapi import FastAPI, UploadFile, File
+import logging
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 import pandas as pd
 import numpy as np
@@ -6,13 +7,17 @@ from datetime import datetime, timedelta
 import os
 from zipfile import ZipFile
 
-app = FastAPI()
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
+app = FastAPI()
 
 TOTAL_INTERVALS = 96  # 48 hours * 2 intervals per hour
 
 
 def add_time_column(simulation_results, total_intervals=96):
+    logger.info("Adding time column to simulation results")
     start_time = datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
     times = [start_time + timedelta(minutes=30 * i) for i in range(total_intervals)]
     formatted_times = [time.strftime("%H:%M") for time in times]
@@ -21,14 +26,28 @@ def add_time_column(simulation_results, total_intervals=96):
 
 
 def time_to_interval(time_str):
-    hour, minute = map(int, time_str.split(":"))
-    return (hour * 2) + (minute // 30)
+    try:
+        hour, minute = map(int, time_str.split(":"))
+        return (hour * 2) + (minute // 30)
+    except ValueError:
+        logger.error(f"Invalid time format: {time_str}")
+        raise ValueError(f"Invalid time format: {time_str}")
 
 
 def minimize_peak_demand_charging(simulation_results, routes_df, vehicles_df, charge_management):
-    for vehicle_id in vehicles_df["VehicleID"].unique():
-        simulation_results[f"ChargeAmount_Vehicle{vehicle_id}_kWh"] = 0.0
-        simulation_results[f"ChargingDemand_Vehicle{vehicle_id}_kW"] = 0.0
+    logger.info("Starting peak demand charging minimization")
+    charge_columns = {
+        f"ChargeAmount_Vehicle{vehicle_id}_kWh": [0.0] * len(simulation_results)
+        for vehicle_id in vehicles_df["VehicleID"].unique()
+    }
+    charge_columns.update(
+        {
+            f"ChargingDemand_Vehicle{vehicle_id}_kW": [0.0] * len(simulation_results)
+            for vehicle_id in vehicles_df["VehicleID"].unique()
+        }
+    )
+
+    simulation_results = pd.concat([simulation_results, pd.DataFrame(charge_columns)], axis=1)
 
     for index, route in routes_df.iterrows():
         vehicle_id = route["VehicleID"]
@@ -52,7 +71,7 @@ def minimize_peak_demand_charging(simulation_results, routes_df, vehicles_df, ch
             if i == start_interval:
                 simulation_results.at[i, f"ChargeAmount_Vehicle{vehicle_id}_kWh"] += float(charge_this_interval)
             else:
-                prev_charge = simulation_results.at[i - 1, f"ChargeAmount_Vehicle{vehicle_id}_kWh"]
+                prev_charge = simulation_results.at[i - 1, f"ChargeAmount_Vehicle{vehicle_id}_kWh"].iloc[0]
                 simulation_results.at[i, f"ChargeAmount_Vehicle{vehicle_id}_kWh"] = float(
                     prev_charge + charge_this_interval
                 )
@@ -63,79 +82,98 @@ def minimize_peak_demand_charging(simulation_results, routes_df, vehicles_df, ch
     ev_columns = [col for col in simulation_results.columns if "ChargingDemand_Vehicle" in col]
     simulation_results["Total_EV_Demand_kW"] = simulation_results[ev_columns].sum(axis=1)
     simulation_results["Total_Demand_kW"] = simulation_results["BaseLoad_kW"] + simulation_results["Total_EV_Demand_kW"]
-    float_columns = [col for col in simulation_results.columns if simulation_results[col].dtype == "float64"]
+    float_columns = [col for col in simulation_results.columns if pd.api.types.is_float_dtype(simulation_results[col])]
     for col in float_columns:
         simulation_results[col] = simulation_results[col].round(2)
     return simulation_results
+
+
+def reformat_time(time_str):
+    formats = ["%H:%M:%S", "%H:%M"]
+    for fmt in formats:
+        try:
+            return pd.to_datetime(time_str, format=fmt).strftime("%H:%M")
+        except ValueError:
+            continue
+    logger.warning(f"Time format issue with: {time_str}")
+    return time_str
 
 
 @app.post("/api/simulate")
 async def simulate(
     vehicles_file: UploadFile = File(...), routes_file: UploadFile = File(...), base_load_file: UploadFile = File(...)
 ):
-    vehicles_df = pd.read_csv(vehicles_file.file)
-    routes_df = pd.read_csv(routes_file.file)
-    base_load_df = pd.read_csv(base_load_file.file)
+    try:
+        logger.info("Starting simulation")
+        vehicles_df = pd.read_csv(vehicles_file.file)
+        routes_df = pd.read_csv(routes_file.file)
+        base_load_df = pd.read_csv(base_load_file.file)
 
-    if len(base_load_df) < TOTAL_INTERVALS:
-        base_load_df = pd.concat([base_load_df] * (TOTAL_INTERVALS // len(base_load_df)), ignore_index=True)
-    base_load_df = base_load_df.iloc[:TOTAL_INTERVALS].reset_index(drop=True)
+        logger.info("Checking base load data length")
+        if len(base_load_df) < TOTAL_INTERVALS:
+            base_load_df = pd.concat([base_load_df] * (TOTAL_INTERVALS // len(base_load_df)), ignore_index=True)
+        base_load_df = base_load_df.iloc[:TOTAL_INTERVALS].reset_index(drop=True)
 
-    simulation_results = pd.DataFrame(
-        {
-            "IntervalIndex": np.arange(TOTAL_INTERVALS),
-            "BaseLoad_kW": base_load_df["Load_kW"].values,
-        }
-    )
+        simulation_results = pd.DataFrame(
+            {
+                "IntervalIndex": np.arange(TOTAL_INTERVALS),
+                "BaseLoad_kW": base_load_df["Load_kW"].values,
+            }
+        )
 
-    for vehicle_id in vehicles_df["VehicleID"].unique():
-        simulation_results[f"ChargingDemand_Vehicle{vehicle_id}_kW"] = 0.0
-        simulation_results[f"ChargeAmount_Vehicle{vehicle_id}_kWh"] = 0.0
+        for vehicle_id in vehicles_df["VehicleID"].unique():
+            simulation_results[f"ChargingDemand_Vehicle{vehicle_id}_kW"] = 0.0
+            simulation_results[f"ChargeAmount_Vehicle{vehicle_id}_kWh"] = 0.0
 
-    routes_df["ReturnInterval"] = routes_df["ReturnTime"].apply(time_to_interval)
-    routes_df["DepartureInterval"] = routes_df["DepartureTime"].apply(time_to_interval) + 48
-    routes_df = routes_df.merge(vehicles_df, on="VehicleID")
-    routes_df["EnergyRequired_kWh"] = routes_df["RouteLength_km"] * routes_df["Efficiency_kWh_km"]
+        logger.info("Preprocessing route times")
+        routes_df["ReturnTime"] = routes_df["ReturnTime"].apply(reformat_time)
+        routes_df["DepartureTime"] = routes_df["DepartureTime"].apply(reformat_time)
 
-    # Save the calculated energy requirements to a CSV file
-    energy_requirements_path = "/tmp/energy_requirements.csv"
-    routes_df.to_csv(energy_requirements_path, index=False)
+        routes_df["ReturnInterval"] = routes_df["ReturnTime"].apply(time_to_interval)
+        routes_df["DepartureInterval"] = routes_df["DepartureTime"].apply(time_to_interval) + 48
+        routes_df = routes_df.merge(vehicles_df, on="VehicleID")
+        routes_df["EnergyRequired_kWh"] = routes_df["RouteLength_km"] * routes_df["Efficiency_kWh_km"]
 
-    # Simulation with charge management
-    simulation_results_with_management = minimize_peak_demand_charging(
-        simulation_results.copy(), routes_df, vehicles_df, charge_management=True
-    )
-    simulation_results_with_management = add_time_column(simulation_results_with_management)
+        energy_requirements_path = "/tmp/energy_requirements.csv"
+        routes_df.to_csv(energy_requirements_path, index=False)
 
-    cols = ["IntervalIndex", "TimeOfDay"] + [
-        col for col in simulation_results_with_management.columns if col not in ["IntervalIndex", "TimeOfDay"]
-    ]
-    simulation_results_with_management = simulation_results_with_management[cols]
+        logger.info("Running simulation with charge management")
+        simulation_results_with_management = minimize_peak_demand_charging(
+            simulation_results.copy(), routes_df, vehicles_df, charge_management=True
+        )
+        simulation_results_with_management = add_time_column(simulation_results_with_management)
 
-    simulation_results_with_management_path = "/tmp/simulation_results_with_management.csv"
-    simulation_results_with_management.to_csv(simulation_results_with_management_path, index=False)
+        cols = ["IntervalIndex", "TimeOfDay"] + [
+            col for col in simulation_results_with_management.columns if col not in ["IntervalIndex", "TimeOfDay"]
+        ]
+        simulation_results_with_management = simulation_results_with_management[cols]
 
-    # Simulation without charge management
-    simulation_results_without_management = minimize_peak_demand_charging(
-        simulation_results.copy(), routes_df, vehicles_df, charge_management=False
-    )
-    simulation_results_without_management = add_time_column(simulation_results_without_management)
+        simulation_results_with_management_path = "/tmp/simulation_results_with_management.csv"
+        simulation_results_with_management.to_csv(simulation_results_with_management_path, index=False)
 
-    simulation_results_without_management = simulation_results_without_management[cols]
+        logger.info("Running simulation without charge management")
+        simulation_results_without_management = minimize_peak_demand_charging(
+            simulation_results.copy(), routes_df, vehicles_df, charge_management=False
+        )
+        simulation_results_without_management = add_time_column(simulation_results_without_management)
 
-    simulation_results_without_management_path = "/tmp/simulation_results_without_management.csv"
-    simulation_results_without_management.to_csv(simulation_results_without_management_path, index=False)
+        simulation_results_without_management = simulation_results_without_management[cols]
 
-    # Create a zip file containing all CSV files
-    zip_file_path = "/tmp/simulation_results.zip"
-    with ZipFile(zip_file_path, "w") as zipf:
-        zipf.write(energy_requirements_path, arcname="energy_requirements.csv")
-        zipf.write(simulation_results_with_management_path, arcname="simulation_results_with_management.csv")
-        zipf.write(simulation_results_without_management_path, arcname="simulation_results_without_management.csv")
+        simulation_results_without_management_path = "/tmp/simulation_results_without_management.csv"
+        simulation_results_without_management.to_csv(simulation_results_without_management_path, index=False)
 
-    # Clean up individual CSV files
-    os.remove(energy_requirements_path)
-    os.remove(simulation_results_with_management_path)
-    os.remove(simulation_results_without_management_path)
+        zip_file_path = "/tmp/simulation_results.zip"
+        with ZipFile(zip_file_path, "w") as zipf:
+            zipf.write(energy_requirements_path, arcname="energy_requirements.csv")
+            zipf.write(simulation_results_with_management_path, arcname="simulation_results_with_management.csv")
+            zipf.write(simulation_results_without_management_path, arcname="simulation_results_without_management.csv")
 
-    return FileResponse(zip_file_path, filename="simulation_results.zip", media_type="application/zip")
+        os.remove(energy_requirements_path)
+        os.remove(simulation_results_with_management_path)
+        os.remove(simulation_results_without_management_path)
+
+        logger.info("Simulation completed successfully")
+        return FileResponse(zip_file_path, filename="simulation_results.zip", media_type="application/zip")
+    except Exception as e:
+        logger.error(f"An error occurred during simulation: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An error occurred during simulation: {e}")
