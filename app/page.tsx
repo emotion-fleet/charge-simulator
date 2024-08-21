@@ -2,9 +2,14 @@
 import { Button } from "@/components/ui/button";
 import { FileInput } from "@/components/ui/file-input";
 import { useState } from "react";
+import JSZip from "jszip";
+import Papa from "papaparse";
+import { EnergyChart } from "@/components/ui/EnergyChart";
 
 export default function Home() {
+
   const [files, setFiles] = useState<{ [key: string]: File | undefined }>({});
+  const [data, setData] = useState(null);
 
   function handleFileChange(event: any) {
     const { id, files } = event.target;
@@ -35,9 +40,35 @@ export default function Home() {
       a.click();
       a.remove();
       window.URL.revokeObjectURL(url);
+
+      const jsonData = await handleZipResponse(blob);
+      if(jsonData){
+        setData(jsonData);
+      }
     } else {
       console.error("Failed to download the file");
     }
+  }
+
+  async function handleZipResponse(blob: Blob) {
+    const zip = await JSZip.loadAsync(blob);
+    let res: any = {};
+    for (const relativePath in zip.files) {
+      const file = zip.files[relativePath];
+
+      if (file.name.endsWith(".csv")) {
+        const csvData = await file.async("text");
+
+        const parsedData = Papa.parse(csvData, {
+          header: true,
+          skipEmptyLines: true,
+        });
+
+        res[file.name] = parsedData.data;
+      }
+    }
+
+    return res;
   }
 
   return (
@@ -55,6 +86,9 @@ export default function Home() {
       <Button className="mt-10" variant="default" onClick={handleUpload}>
         Upload
       </Button>
+      <div className="mt-16 w-full">
+        {data && <EnergyChart chartData={data} />}
+      </div>
     </div>
   );
 }
