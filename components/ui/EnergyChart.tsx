@@ -51,7 +51,8 @@ export function EnergyChart({ chartData }: EnergyChartProps) {
       const unmanagedDataArray: any[] =
         chartData["simulation_results_without_management.csv"];
 
-      for (let i = 0; i < managedDataArray.length; i++) {
+      const first24hDataLength = 48;
+      for (let i = 0; i < first24hDataLength; i++) {
         const dataItem: EnergyChartData = {
           time: managedDataArray[i].TimeOfDay,
           managedElectricPower: managedDataArray[i].Total_Demand_kW,
